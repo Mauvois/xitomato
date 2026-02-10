@@ -15,10 +15,12 @@
           :current-session="currentSession"
           :remaining-seconds="remainingSeconds"
           :is-running="isRunning"
+          :collapsed="activePanel !== 'timer'"
           @start="startFocus"
           @stop="stopCurrent"
           @adjust="adjustCurrent"
           @task-change="updateCurrentTask"
+          @focus="activePanel = 'timer'"
         />
         <PlannerPanel
           :tasks="activeTasks"
@@ -27,6 +29,7 @@
           :default-minutes="settings?.default_focus_minutes || 45"
           :selected-date="selectedDate"
           :current-session="currentSession"
+          :collapsed="activePanel !== 'planner'"
           @plan="planSession"
           @start="startPlanned"
           @remove="removePlanned"
@@ -34,6 +37,7 @@
           @move="moveSession"
           @error="showToast"
           @reset-planned="resetDay('planned')"
+          @focus="activePanel = 'planner'"
         />
       </div>
 
@@ -103,6 +107,7 @@ const toastMessage = ref("");
 const selectedDate = ref(new Date().toISOString().slice(0, 10));
 const currentTime = ref(new Date());
 const lastFocusMinutes = ref(null);
+const activePanel = ref("timer");
 
 const isRunning = computed(() => currentSession.value?.state === "running");
 
@@ -125,6 +130,8 @@ const currentDaypart = computed(() =>
   settings.value?.dayparts ? resolveDaypart(settings.value.dayparts, currentTime.value) : ""
 );
 
+const tabTimerLabel = computed(() => formatCountdown(remainingSeconds.value));
+
 const pauseMessage = computed(() => {
   if (!pauseCards.value.length) return "Aucune carte configuree";
   const hasAvailable = pauseCards.value.some((card) => card.remaining_today > 0);
@@ -146,6 +153,12 @@ function formatDateLabel(dateString) {
 
 function formatTimeLabel(dateValue) {
   return dateValue.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatCountdown(secondsValue) {
+  const minutes = Math.floor(secondsValue / 60);
+  const seconds = secondsValue % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
 function parseTime(value) {
@@ -560,4 +573,12 @@ watch(selectedDate, (value) => {
     showToast(err.message || "Erreur chargement jour");
   });
 });
+
+watch(
+  [remainingSeconds, isRunning],
+  () => {
+    document.title = isRunning.value ? tabTimerLabel.value : "Xitomato";
+  },
+  { immediate: true }
+);
 </script>

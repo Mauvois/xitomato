@@ -1,15 +1,17 @@
 <template>
-  <div class="panel stack planner-panel">
+  <div class="panel stack planner-panel" @click="emit('focus')">
     <div class="topbar">
       <span v-if="plannedSessions.length" class="badge">
         {{ plannedSessions.length }} prevues
       </span>
       <div class="row">
-        <button v-if="!showForm" class="ghost" @click="showForm = true">Ajouter une session</button>
+        <button v-if="!showForm || collapsed" class="ghost" @click="openForm">
+          Ajouter une session
+        </button>
       </div>
     </div>
 
-    <div v-if="showForm" class="stack planner-form">
+    <div v-if="showForm && !collapsed" class="stack planner-form">
       <input v-model="title" class="input input--medium" placeholder="Pomodoro a planifier" />
       <select v-model.number="taskId" class="input input--medium">
         <option :value="null">Tache (optionnel)</option>
@@ -36,6 +38,13 @@
         <div class="row">
           <button class="secondary" @click="planRemaining">
             Planifier {{ limitWarning.remaining }} min
+          </button>
+          <button
+            v-if="limitWarning.nextDaypart"
+            class="secondary"
+            @click="planInNextDaypart"
+          >
+            Planifier {{ limitWarning.duration }} min en {{ limitWarning.nextDaypart.name }}
           </button>
           <button class="ghost" @click="limitWarning = null">Annuler</button>
         </div>
@@ -103,10 +112,20 @@ const props = defineProps({
   plannedSessions: { type: Array, default: () => [] },
   defaultMinutes: { type: Number, default: 45 },
   selectedDate: { type: String, default: "" },
-  currentSession: { type: Object, default: null }
+  currentSession: { type: Object, default: null },
+  collapsed: { type: Boolean, default: false }
 });
 
-const emit = defineEmits(["plan", "start", "remove", "update", "move", "error", "reset-planned"]);
+const emit = defineEmits([
+  "plan",
+  "start",
+  "remove",
+  "update",
+  "move",
+  "error",
+  "reset-planned",
+  "focus"
+]);
 
 const taskId = ref(null);
 const minutes = ref(props.defaultMinutes);
@@ -171,7 +190,9 @@ function plan() {
     limitWarning.value = {
       remaining,
       daypart: daypartName.value,
-      plannedTime: plannedTime.value
+      plannedTime: plannedTime.value,
+      duration: minutes.value,
+      nextDaypart: nextDaypartFrom(daypartName.value, props.dayparts)
     };
     return;
   }
@@ -215,7 +236,8 @@ function autoPlan(duration) {
       remaining,
       daypart: next.daypart,
       plannedTime: nextTime,
-      duration
+      duration,
+      nextDaypart: nextDaypartFrom(next.daypart, props.dayparts)
     };
     return;
   }
@@ -297,6 +319,30 @@ function planRemaining() {
   showForm.value = false;
 }
 
+function openForm(event) {
+  if (event) event.stopPropagation();
+  emit("focus");
+  showForm.value = true;
+}
+
+function planInNextDaypart() {
+  if (!limitWarning.value?.nextDaypart) return;
+  const next = limitWarning.value.nextDaypart;
+  emit("plan", {
+    kind: "focus",
+    task_id: taskId.value,
+    minutes: limitWarning.value.duration,
+    title: title.value || null,
+    date: props.selectedDate,
+    daypart_name: next.name,
+    planned_time: next.start
+  });
+  title.value = "";
+  plannedTime.value = next.start;
+  limitWarning.value = null;
+  showForm.value = false;
+}
+
 onMounted(() => {
   plannedTime.value = roundedNow();
   daypartName.value = resolveDaypartName(props.dayparts, plannedTime.value);
@@ -361,6 +407,21 @@ function adjustForGap(startMinutes, dayparts) {
   const next = ranges.find((range) => startMinutes < range.start);
   if (!next) return null;
   return { minutes: next.start, daypart: next.name };
+}
+
+function nextDaypartFrom(currentName, dayparts) {
+  if (!dayparts?.length || !currentName) return null;
+  const sorted = [...dayparts]
+    .map((part) => ({
+      name: part.name,
+      start: part.start,
+      startMinutes: timeToMinutes(part.start)
+    }))
+    .sort((a, b) => a.startMinutes - b.startMinutes);
+  const current = sorted.find((part) => part.name === currentName);
+  if (!current) return null;
+  const next = sorted.find((part) => part.startMinutes > current.startMinutes);
+  return next ? { name: next.name, start: next.start } : null;
 }
 
 function timeFromSession(session) {
