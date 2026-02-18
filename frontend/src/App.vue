@@ -161,6 +161,17 @@ function formatCountdown(secondsValue) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function localNowIso() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const hour = String(now.getHours()).padStart(2, "0");
+  const minute = String(now.getMinutes()).padStart(2, "0");
+  const second = String(now.getSeconds()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hour}:${minute}:${second}`;
+}
+
 function parseTime(value) {
   const [hour, minute] = value.split(":").map(Number);
   return { hour, minute };
@@ -197,7 +208,12 @@ async function loadAll() {
 }
 
 async function loadDay(dateValue) {
-  sessions.value = await api.listSessions(dateValue, dateValue);
+  const now = new Date();
+  const clientDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(
+    now.getDate()
+  ).padStart(2, "0")}`;
+  const clientMinutes = now.getHours() * 60 + now.getMinutes();
+  sessions.value = await api.listSessions(dateValue, dateValue, clientDate, clientMinutes);
   dailyState.value = await api.getDailyState(dateValue);
   if (dateValue === today()) {
     const running = sessions.value.find((session) => session.state === "running");
@@ -244,7 +260,7 @@ function toDate(value) {
   if (!value) return new Date();
   if (typeof value === "string") {
     const hasZone = value.endsWith("Z") || /[+-]\d\d:\d\d$/.test(value);
-    return new Date(hasZone ? value : `${value}Z`);
+    return new Date(hasZone ? value : value);
   }
   return new Date(value);
 }
@@ -256,7 +272,13 @@ async function startFocus({ taskId, minutes, title }) {
       return;
     }
     selectedDate.value = today();
-    const session = await api.startSession({ kind: "focus", task_id: taskId, minutes, title });
+    const session = await api.startSession({
+      kind: "focus",
+      task_id: taskId,
+      minutes,
+      title,
+      client_now: localNowIso()
+    });
     currentSession.value = session;
     await loadDay(selectedDate.value);
     startTimer();
@@ -268,7 +290,7 @@ async function startFocus({ taskId, minutes, title }) {
 async function stopCurrent() {
   if (!currentSession.value) return;
   try {
-    const session = await api.stopSession(currentSession.value.id);
+    const session = await api.stopSession(currentSession.value.id, localNowIso());
     if (session.kind === "focus") {
       lastFocusMinutes.value = session.planned_minutes;
     }
@@ -285,7 +307,7 @@ async function stopCurrent() {
 async function skipCurrent() {
   if (!currentSession.value) return;
   try {
-    await api.skipSession(currentSession.value.id);
+    await api.skipSession(currentSession.value.id, localNowIso());
     currentSession.value = null;
     stopTimer();
     await loadDay(selectedDate.value);
@@ -297,8 +319,12 @@ async function skipCurrent() {
 async function adjustCurrent(delta) {
   if (!currentSession.value) return;
   try {
-    currentSession.value = await api.adjustSession(currentSession.value.id, { minutes_delta: delta });
+    currentSession.value = await api.adjustSession(currentSession.value.id, {
+      minutes_delta: delta,
+      client_now: localNowIso()
+    });
     updateRemaining();
+    await loadDay(selectedDate.value);
   } catch (err) {
     showToast(err.message || "Erreur ajustement");
   }
@@ -307,7 +333,7 @@ async function adjustCurrent(delta) {
 async function mergeNext() {
   if (!currentSession.value) return;
   try {
-    currentSession.value = await api.mergeNext(currentSession.value.id);
+    currentSession.value = await api.mergeNext(currentSession.value.id, localNowIso());
     await loadDay(selectedDate.value);
   } catch (err) {
     showToast(err.message || "Impossible de coller");
@@ -406,7 +432,7 @@ async function startPlanned(session) {
       return;
     }
     selectedDate.value = today();
-    const started = await api.startPlannedSession(session.id);
+    const started = await api.startPlannedSession(session.id, localNowIso());
     currentSession.value = started;
     await loadDay(selectedDate.value);
     startTimer();
@@ -445,7 +471,11 @@ async function consumePause(card) {
   }
   try {
     const minutes = resolveBreakMinutes(lastFocusMinutes.value, settings.value?.default_break_minutes);
-    const session = await api.consumePause({ pause_card_id: card.id, minutes });
+    const session = await api.consumePause({
+      pause_card_id: card.id,
+      minutes,
+      client_now: localNowIso()
+    });
     currentSession.value = session;
     showPauseModal.value = false;
     pauseCards.value = await api.listPauseCards();
@@ -459,7 +489,7 @@ async function consumePause(card) {
 async function resetCurrentSession() {
   if (!currentSession.value) return;
   try {
-    await api.resetSession(currentSession.value.id);
+    await api.resetSession(currentSession.value.id, localNowIso());
     currentSession.value = null;
     stopTimer();
     await loadDay(selectedDate.value);

@@ -26,16 +26,41 @@ export const api = {
   createTask: (payload) => request("/tasks", { method: "POST", body: JSON.stringify(payload) }),
   updateTask: (id, payload) => request(`/tasks/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   completeTask: (id) => request(`/tasks/${id}/complete`, { method: "POST" }),
-  listSessions: (from, to) => request(`/sessions?from=${from}&to=${to}`),
+  listSessions: (from, to, clientDate, clientMinutes) =>
+    request(
+      `/sessions?from=${from}&to=${to}`
+        + `${clientDate ? `&client_date=${encodeURIComponent(clientDate)}` : ""}`
+        + `${clientMinutes !== undefined && clientMinutes !== null ? `&client_minutes=${clientMinutes}` : ""}`
+    ),
   startSession: (payload) => request("/sessions/start", { method: "POST", body: JSON.stringify(payload) }),
   planSession: (payload) => request("/sessions/plan", { method: "POST", body: JSON.stringify(payload) }),
-  startPlannedSession: (id) => request(`/sessions/${id}/start`, { method: "POST" }),
-  stopSession: (id) => request(`/sessions/${id}/stop`, { method: "POST" }),
-  skipSession: (id) => request(`/sessions/${id}/skip`, { method: "POST" }),
+  startPlannedSession: (id, clientNow) =>
+    request(
+      `/sessions/${id}/start${clientNow ? `?client_now=${encodeURIComponent(clientNow)}` : ""}`,
+      { method: "POST" }
+    ),
+  stopSession: (id, clientNow) =>
+    request(
+      `/sessions/${id}/stop${clientNow ? `?client_now=${encodeURIComponent(clientNow)}` : ""}`,
+      { method: "POST" }
+    ),
+  skipSession: (id, clientNow) =>
+    request(
+      `/sessions/${id}/skip${clientNow ? `?client_now=${encodeURIComponent(clientNow)}` : ""}`,
+      { method: "POST" }
+    ),
   adjustSession: (id, payload) => request(`/sessions/${id}/adjust`, { method: "POST", body: JSON.stringify(payload) }),
-  mergeNext: (id) => request(`/sessions/${id}/merge-next`, { method: "POST" }),
+  mergeNext: (id, clientNow) =>
+    request(
+      `/sessions/${id}/merge-next${clientNow ? `?client_now=${encodeURIComponent(clientNow)}` : ""}`,
+      { method: "POST" }
+    ),
   updateSession: (id, payload) => request(`/sessions/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
-  resetSession: (id) => request(`/sessions/${id}/reset`, { method: "POST" }),
+  resetSession: (id, clientNow) =>
+    request(
+      `/sessions/${id}/reset${clientNow ? `?client_now=${encodeURIComponent(clientNow)}` : ""}`,
+      { method: "POST" }
+    ),
   resetDay: (date, mode) => request(`/sessions/reset-day?date=${date}&mode=${mode}`, { method: "POST" }),
   listPauseCards: () => request("/pause-cards"),
   createPauseCard: (payload) => request("/pause-cards", { method: "POST", body: JSON.stringify(payload) }),

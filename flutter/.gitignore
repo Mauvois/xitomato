@@ -1,0 +1,10 @@
+.dart_tool/
+.idea/
+.vscode/
+build/
+ios/Flutter/.last_build_id
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+android/.gradle/
+android/local.properties
+pubspec.lock

@@ -436,7 +436,7 @@ function toDate(value) {
   if (!value) return new Date();
   if (typeof value === "string") {
     const hasZone = value.endsWith("Z") || /[+-]\d\d:\d\d$/.test(value);
-    return new Date(hasZone ? value : `${value}Z`);
+    return new Date(hasZone ? value : value);
   }
   return new Date(value);
 }

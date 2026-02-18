@@ -1,6 +1,7 @@
 import json
+import math
 import os
-from datetime import datetime, date as date_type
+from datetime import datetime, date as date_type, time as time_type, timedelta
 from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -106,6 +107,23 @@ def get_or_create_settings(db: Session) -> tuple[Settings, bool]:
     return settings, True
 
 
+def current_time() -> datetime:
+    return datetime.now()
+
+
+def parse_client_now(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo:
+            return parsed.replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        return None
+
+
 def seed_pause_cards(db: Session) -> None:
     existing = db.query(PauseCard).count()
     if existing > 0:
@@ -135,6 +153,293 @@ def compute_actual_minutes(start_at: datetime, end_at: datetime) -> int:
     delta_seconds = max(0, int((end_at - start_at).total_seconds()))
     minutes = max(1, int(round(delta_seconds / 60)))
     return minutes
+
+
+def break_for(minutes_value: int) -> int:
+    return 10 if minutes_value >= 45 else 5
+
+
+def resolve_break_minutes(focus_minutes: int, fallback: int) -> int:
+    if not focus_minutes:
+        return fallback or 5
+    if focus_minutes >= 45:
+        return 10
+    return 5
+
+
+def ceil_to_step(value: int, step: int = 5) -> int:
+    return int(math.ceil(value / step) * step)
+
+
+def minutes_from_datetime(value: datetime) -> int:
+    return value.hour * 60 + value.minute
+
+
+def minutes_from_time_string(value: str) -> int:
+    hour, minute = value.split(":")
+    return int(hour) * 60 + int(minute)
+
+
+def daypart_bounds(dayparts, name: str) -> Optional[tuple[int, int]]:
+    for part in dayparts:
+        if part["name"] != name:
+            continue
+        start = minutes_from_time_string(part["start"])
+        end = minutes_from_time_string(part["end"])
+        if end == 0 or end <= start:
+            end = 1440
+        return start, end
+    return None
+
+
+def resolve_daypart_name_by_minutes(dayparts, minutes_value: int) -> str:
+    for part in dayparts:
+        start = minutes_from_time_string(part["start"])
+        end = minutes_from_time_string(part["end"])
+        if end == 0 or end <= start:
+            end = 1440
+        if start <= minutes_value < end:
+            return part["name"]
+    return dayparts[0]["name"] if dayparts else ""
+
+
+def datetime_from_minutes(date_value: str, minutes_value: int) -> datetime:
+    clamped = max(0, min(1439, minutes_value))
+    hour = clamped // 60
+    minute = clamped % 60
+    return datetime.combine(
+        datetime.fromisoformat(date_value).date(), time_type(hour, minute)
+    )
+
+
+def adjust_for_gap(start_minutes: int, dayparts) -> Optional[int]:
+    ranges = []
+    for part in dayparts:
+        start = int(part["start"].split(":")[0]) * 60 + int(part["start"].split(":")[1])
+        end = int(part["end"].split(":")[0]) * 60 + int(part["end"].split(":")[1])
+        if end == 0 or end <= start:
+            end = 1440
+        ranges.append({"name": part["name"], "start": start, "end": end})
+    ranges.sort(key=lambda item: item["start"])
+
+    for daypart in ranges:
+        if start_minutes >= daypart["start"] and start_minutes < daypart["end"]:
+            return start_minutes
+
+    next_range = next((item for item in ranges if start_minutes < item["start"]), None)
+    if not next_range:
+        return None
+    return next_range["start"]
+
+
+def shift_planned_after_early_stop(
+    db: Session, session: SessionModel, settings: Settings
+) -> None:
+    if session.kind != "focus":
+        return
+    if not session.actual_minutes:
+        return
+    if session.actual_minutes >= session.planned_minutes:
+        return
+    planned = (
+        db.query(SessionModel)
+        .filter(
+            SessionModel.date == session.date,
+            SessionModel.state == "planned",
+            SessionModel.kind == "focus",
+        )
+        .order_by(SessionModel.start_at.asc(), SessionModel.id.asc())
+        .all()
+    )
+    if not planned:
+        return
+    dayparts = json.loads(settings.dayparts_json)
+    break_minutes = resolve_break_minutes(
+        session.planned_minutes, settings.default_break_minutes
+    )
+    base_minutes = minutes_from_datetime(session.end_at) + break_minutes
+    base_minutes = ceil_to_step(base_minutes, 5)
+    base_minutes = adjust_for_gap(base_minutes, dayparts)
+    if base_minutes is None:
+        return
+
+    for planned_session in planned:
+        planned_start = datetime_from_minutes(session.date, base_minutes)
+        planned_session.start_at = planned_start
+        planned_session.daypart_name = resolve_daypart_name(dayparts, planned_start)
+        base_minutes = (
+            base_minutes
+            + planned_session.planned_minutes
+            + break_for(planned_session.planned_minutes)
+        )
+        base_minutes = ceil_to_step(base_minutes, 5)
+        base_minutes = adjust_for_gap(base_minutes, dayparts)
+        if base_minutes is None:
+            break
+
+
+def shift_planned_after_adjust(
+    db: Session,
+    session: SessionModel,
+    settings: Settings,
+    client_now: Optional[datetime],
+) -> None:
+    if session.kind != "focus":
+        return
+    if session.state != "running":
+        return
+    dayparts = json.loads(settings.dayparts_json)
+    planned_end = session.start_at + timedelta(minutes=session.planned_minutes)
+    now = client_now or current_time()
+    break_minutes = resolve_break_minutes(
+        session.planned_minutes, settings.default_break_minutes
+    )
+    base_minutes = minutes_from_datetime(max(now, planned_end)) + break_minutes
+    base_minutes = ceil_to_step(base_minutes, 5)
+    base_minutes = adjust_for_gap(base_minutes, dayparts)
+    if base_minutes is None:
+        return
+    planned = (
+        db.query(SessionModel)
+        .filter(
+            SessionModel.date == session.date,
+            SessionModel.state == "planned",
+            SessionModel.kind == "focus",
+        )
+        .order_by(SessionModel.start_at.asc(), SessionModel.id.asc())
+        .all()
+    )
+    if not planned:
+        return
+    for planned_session in planned:
+        planned_start = datetime_from_minutes(session.date, base_minutes)
+        planned_session.start_at = planned_start
+        planned_session.daypart_name = resolve_daypart_name(dayparts, planned_start)
+        base_minutes = (
+            base_minutes
+            + planned_session.planned_minutes
+            + break_for(planned_session.planned_minutes)
+        )
+        base_minutes = ceil_to_step(base_minutes, 5)
+        base_minutes = adjust_for_gap(base_minutes, dayparts)
+        if base_minutes is None:
+            break
+
+
+def shift_planned_for_today(
+    db: Session,
+    date_value: str,
+    settings: Settings,
+    client_date: Optional[str],
+    client_minutes: Optional[int],
+) -> None:
+    today_value = client_date or date_type.today().isoformat()
+    if date_value != today_value:
+        return
+    planned = (
+        db.query(SessionModel)
+        .filter(
+            SessionModel.date == date_value,
+            SessionModel.state == "planned",
+            SessionModel.kind == "focus",
+        )
+        .order_by(SessionModel.start_at.asc(), SessionModel.id.asc())
+        .all()
+    )
+    if not planned:
+        return
+    dayparts = json.loads(settings.dayparts_json)
+    now = current_time()
+    minutes_now = (
+        client_minutes if client_minutes is not None else minutes_from_datetime(now)
+    )
+    current_daypart = resolve_daypart_name_by_minutes(dayparts, minutes_now)
+    current_bounds = daypart_bounds(dayparts, current_daypart)
+    base_minutes = minutes_now
+    running = (
+        db.query(SessionModel)
+        .filter(
+            SessionModel.date == date_value,
+            SessionModel.state == "running",
+        )
+        .order_by(SessionModel.start_at.desc(), SessionModel.id.desc())
+        .first()
+    )
+    if running:
+        planned_end = running.start_at + timedelta(minutes=running.planned_minutes)
+        extra_break = (
+            resolve_break_minutes(
+                running.planned_minutes, settings.default_break_minutes
+            )
+            if running.kind == "focus"
+            else 0
+        )
+        base_minutes = max(
+            base_minutes, minutes_from_datetime(planned_end) + extra_break
+        )
+    break_override = False
+    planned_in_daypart = [
+        session for session in planned if session.daypart_name == current_daypart
+    ]
+    if planned_in_daypart and current_bounds:
+        base_rounded = ceil_to_step(base_minutes, 5)
+        base_in_daypart = max(base_rounded, current_bounds[0])
+        available = max(0, current_bounds[1] - base_in_daypart)
+        if available > 0:
+
+            def break_duration(minutes_value: int, override: bool) -> int:
+                if override and minutes_value >= 45:
+                    return 5
+                return break_for(minutes_value)
+
+            def workload(sessions, override: bool) -> int:
+                if not sessions:
+                    return 0
+                total = sum(session.planned_minutes for session in sessions)
+                if len(sessions) > 1:
+                    total += sum(
+                        break_duration(session.planned_minutes, override)
+                        for session in sessions[:-1]
+                    )
+                return total
+
+            def reduce_sessions(sessions, from_minutes: int, to_minutes: int) -> None:
+                for session in sessions:
+                    if session.planned_minutes == from_minutes:
+                        session.planned_minutes = to_minutes
+
+            if workload(planned_in_daypart, break_override) > available:
+                break_override = True
+                if workload(planned_in_daypart, break_override) > available:
+                    reduce_sessions(planned_in_daypart, 45, 40)
+                    if workload(planned_in_daypart, break_override) > available:
+                        reduce_sessions(planned_in_daypart, 20, 15)
+                        if workload(planned_in_daypart, break_override) > available:
+                            reduce_sessions(planned_in_daypart, 40, 35)
+    base_minutes = ceil_to_step(base_minutes, 5)
+    base_minutes = adjust_for_gap(base_minutes, dayparts)
+    if base_minutes is None:
+        return
+    for planned_session in planned:
+        planned_start = datetime_from_minutes(date_value, base_minutes)
+        planned_session.start_at = planned_start
+        planned_session.daypart_name = resolve_daypart_name(dayparts, planned_start)
+        in_current_daypart = (
+            current_bounds is not None
+            and current_bounds[0] <= base_minutes < current_bounds[1]
+        )
+        break_minutes = break_for(planned_session.planned_minutes)
+        if (
+            break_override
+            and in_current_daypart
+            and planned_session.planned_minutes >= 45
+        ):
+            break_minutes = 5
+        base_minutes = base_minutes + planned_session.planned_minutes + break_minutes
+        base_minutes = ceil_to_step(base_minutes, 5)
+        base_minutes = adjust_for_gap(base_minutes, dayparts)
+        if base_minutes is None:
+            break
 
 
 @app.get("/api/v1/daily-state", response_model=DailyStateResponse)
@@ -217,8 +522,14 @@ def complete_task(task_id: int, db: Session = Depends(get_db)):
 def list_sessions(
     from_date: str = Query(..., alias="from"),
     to_date: str = Query(..., alias="to"),
+    client_date: Optional[str] = Query(default=None),
+    client_minutes: Optional[int] = Query(default=None),
     db: Session = Depends(get_db),
 ):
+    settings, _ = get_or_create_settings(db)
+    if from_date == to_date:
+        shift_planned_for_today(db, from_date, settings, client_date, client_minutes)
+        db.commit()
     return (
         db.query(SessionModel)
         .filter(and_(SessionModel.date >= from_date, SessionModel.date <= to_date))
@@ -235,7 +546,7 @@ def start_session(payload: SessionStart, db: Session = Depends(get_db)):
         )
     settings, _ = get_or_create_settings(db)
     minutes = payload.minutes or settings.default_focus_minutes
-    now = datetime.utcnow()
+    now = parse_client_now(payload.client_now) or current_time()
     dayparts = json.loads(settings.dayparts_json)
     session = SessionModel(
         kind=payload.kind,
@@ -263,6 +574,16 @@ def plan_session(payload: SessionPlan, db: Session = Depends(get_db)):
     settings, _ = get_or_create_settings(db)
     minutes = payload.minutes or settings.default_focus_minutes
     start_at = build_datetime(payload.date, payload.planned_time)
+    today_value = date_type.today().isoformat()
+    if payload.date == today_value:
+        now = current_time()
+        if start_at < now:
+            dayparts = json.loads(settings.dayparts_json)
+            base_minutes = minutes_from_datetime(now)
+            base_minutes = ceil_to_step(base_minutes, 5)
+            base_minutes = adjust_for_gap(base_minutes, dayparts)
+            if base_minutes is not None:
+                start_at = datetime_from_minutes(payload.date, base_minutes)
     session = SessionModel(
         kind=payload.kind,
         task_id=payload.task_id,
@@ -281,7 +602,11 @@ def plan_session(payload: SessionPlan, db: Session = Depends(get_db)):
 
 
 @app.post("/api/v1/sessions/{session_id}/start", response_model=SessionResponse)
-def start_planned_session(session_id: int, db: Session = Depends(get_db)):
+def start_planned_session(
+    session_id: int,
+    client_now: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -289,7 +614,7 @@ def start_planned_session(session_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Session is not planned")
     settings, _ = get_or_create_settings(db)
     dayparts = json.loads(settings.dayparts_json)
-    now = datetime.utcnow()
+    now = parse_client_now(client_now) or current_time()
     session.start_at = now
     session.state = "running"
     session.date = now.date().isoformat()
@@ -300,27 +625,37 @@ def start_planned_session(session_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/v1/sessions/{session_id}/stop", response_model=SessionResponse)
-def stop_session(session_id: int, db: Session = Depends(get_db)):
+def stop_session(
+    session_id: int,
+    client_now: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if session.state != "running":
         raise HTTPException(status_code=400, detail="Session is not running")
-    session.end_at = datetime.utcnow()
+    settings, _ = get_or_create_settings(db)
+    session.end_at = parse_client_now(client_now) or current_time()
     session.actual_minutes = compute_actual_minutes(session.start_at, session.end_at)
     session.state = "completed"
+    shift_planned_after_early_stop(db, session, settings)
     db.commit()
     db.refresh(session)
     return session
 
 
 @app.post("/api/v1/sessions/{session_id}/skip", response_model=SessionResponse)
-def skip_session(session_id: int, db: Session = Depends(get_db)):
+def skip_session(
+    session_id: int,
+    client_now: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     session.state = "skipped"
-    session.end_at = datetime.utcnow()
+    session.end_at = parse_client_now(client_now) or current_time()
     session.actual_minutes = 0
     db.commit()
     db.refresh(session)
@@ -335,13 +670,21 @@ def adjust_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     session.planned_minutes = max(1, session.planned_minutes + payload.minutes_delta)
+    settings, _ = get_or_create_settings(db)
+    shift_planned_after_adjust(
+        db, session, settings, parse_client_now(payload.client_now)
+    )
     db.commit()
     db.refresh(session)
     return session
 
 
 @app.post("/api/v1/sessions/{session_id}/reset")
-def reset_session(session_id: int, db: Session = Depends(get_db)):
+def reset_session(
+    session_id: int,
+    client_now: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -350,7 +693,7 @@ def reset_session(session_id: int, db: Session = Depends(get_db)):
         db.commit()
         return {"status": "deleted"}
     session.state = "aborted"
-    session.end_at = datetime.utcnow()
+    session.end_at = parse_client_now(client_now) or current_time()
     session.actual_minutes = 0
     db.commit()
     return {"status": "aborted"}
@@ -383,7 +726,11 @@ def reset_day(
 
 
 @app.post("/api/v1/sessions/{session_id}/merge-next", response_model=SessionResponse)
-def merge_next(session_id: int, db: Session = Depends(get_db)):
+def merge_next(
+    session_id: int,
+    client_now: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -407,7 +754,7 @@ def merge_next(session_id: int, db: Session = Depends(get_db)):
     state.pause_due_minutes += settings.default_break_minutes
     session.planned_minutes += next_session.planned_minutes
     next_session.state = "skipped"
-    next_session.end_at = datetime.utcnow()
+    next_session.end_at = parse_client_now(client_now) or current_time()
     next_session.actual_minutes = 0
     db.commit()
     db.refresh(session)
@@ -522,7 +869,10 @@ def consume_pause_card(payload: PauseConsume, db: Session = Depends(get_db)):
     card = db.query(PauseCard).filter(PauseCard.id == payload.pause_card_id).first()
     if not card:
         raise HTTPException(status_code=404, detail="Pause card not found")
-    today = date_type.today().isoformat()
+    client_now = parse_client_now(payload.client_now)
+    today = (
+        client_now.date().isoformat() if client_now else date_type.today().isoformat()
+    )
     used = (
         db.query(func.count(PauseCardUse.id))
         .filter(PauseCardUse.pause_card_id == card.id, PauseCardUse.date == today)
@@ -533,7 +883,7 @@ def consume_pause_card(payload: PauseConsume, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Pause card quota exhausted")
     settings, _ = get_or_create_settings(db)
     minutes = payload.minutes or settings.default_break_minutes
-    now = datetime.utcnow()
+    now = client_now or current_time()
     dayparts = json.loads(settings.dayparts_json)
     session = SessionModel(
         kind="break",

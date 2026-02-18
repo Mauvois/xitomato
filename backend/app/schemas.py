@@ -72,6 +72,7 @@ class SessionStart(BaseModel):
     task_id: Optional[int] = None
     minutes: Optional[int] = Field(default=None, ge=1)
     title: Optional[str] = None
+    client_now: Optional[str] = None
 
 
 class SessionPlan(BaseModel):
@@ -90,6 +91,7 @@ class SessionStop(BaseModel):
 
 class SessionAdjust(BaseModel):
     minutes_delta: int
+    client_now: Optional[str] = None
 
 
 class SessionMerge(BaseModel):
@@ -131,6 +133,7 @@ class PauseCardResponse(PauseCardBase):
 class PauseConsume(BaseModel):
     pause_card_id: int
     minutes: Optional[int] = Field(default=None, ge=1)
+    client_now: Optional[str] = None
 
 
 class DailyStateResponse(BaseModel):

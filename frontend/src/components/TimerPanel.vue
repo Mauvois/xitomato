@@ -4,17 +4,17 @@
       <span class="badge">{{ currentKindLabel }}</span>
     </div>
     <div class="timer-display">{{ displayTime }}</div>
+    <div class="row">
+      <button class="secondary" @click="onStop" :disabled="!isRunning">Stop</button>
+      <button class="secondary" @click="() => onAdjust(5)" :disabled="!currentSession">+5 min</button>
+      <button class="secondary" @click="() => onAdjust(-5)" :disabled="!currentSession">-5 min</button>
+    </div>
     <small v-if="currentTitle">{{ currentTitle }}</small>
     <div v-if="!collapsed" class="stack">
       <input v-model="sessionTitle" class="input input--medium" placeholder="Nouveau pomodoro" />
       <div class="row">
         <button class="primary" @click="() => onStart(25)" :disabled="isRunning">Focus 25 min</button>
         <button class="primary" @click="() => onStart(45)" :disabled="isRunning">Focus 45 min</button>
-        <button class="secondary" @click="onStop" :disabled="!isRunning">Stop</button>
-      </div>
-      <div class="row">
-        <button class="secondary" @click="() => onAdjust(5)" :disabled="!currentSession">+5 min</button>
-        <button class="secondary" @click="() => onAdjust(-5)" :disabled="!currentSession">-5 min</button>
       </div>
       <div class="stack">
         <select v-model.number="selectedTaskId" class="input input--medium">
