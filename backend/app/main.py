@@ -526,10 +526,6 @@ def list_sessions(
     client_minutes: Optional[int] = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    settings, _ = get_or_create_settings(db)
-    if from_date == to_date:
-        shift_planned_for_today(db, from_date, settings, client_date, client_minutes)
-        db.commit()
     return (
         db.query(SessionModel)
         .filter(and_(SessionModel.date >= from_date, SessionModel.date <= to_date))
